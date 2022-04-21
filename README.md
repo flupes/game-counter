@@ -11,7 +11,7 @@ A simple desktop app sends if some apps are active via the USB/Serial port to an
 The app collects which processes are active periodically (10s TBR) and writes a single byte on the serial port. This byte contains “slots” for 6 different apps (1 per bit) we are interested to monitor.
 
 | Bit 7 | Bit 6 | Bit 5 | Bit 4 | Bit 3 | Bit 2 | Bit 1 | Bit 0 |
-|——————-|——————-|———————|——————-|———————|——————-|———————|——————-|
+| —- | —- | —- | —- | —- | —- | —- | —- |
 |   0   | App 6 | App 5 | App 4 | App 3 | App 2 | App 1 |   0   |
 
   - App bit == 1 —> app is currently active
