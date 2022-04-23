@@ -8,10 +8,11 @@ dev.port = 'COM8'
 dev.baudrate = 9600
 dev.write_timeout = 3
 
-DEBUG = True
+# DEBUG = True
+DEBUG = False
 
-RECONNECT_WAIT = 10
-UPDATE_PERIOD = 5
+RECONNECT_WAIT = 30
+UPDATE_PERIOD = 10
 PROCESSES_MONITORED = {
   1: 'wsl.exe',
   2: 'firefox.exe',
