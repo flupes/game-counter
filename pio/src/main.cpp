@@ -195,14 +195,16 @@ void loop() {
       lastAnim = now;
       Wheel();
     }
-    if (now - lastRead > 40000) {  // comms timeout
-      gAppsActive = false;
-      connected = false;
-    }
   } else {
     gDisplay.writeDigitRaw(0, 0x0);
     gDisplay.print(gAccumulatedMinutes + kMinuteOffset);
   }
+
+  if (now - lastRead > 40000) {  // comms timeout
+    gAppsActive = false;
+    connected = false;
+  }
+
   // control the dots *after* the rest of the digits since the Adafruit
   // library seems to clear them with prints.
   uint8_t dots = 0x0;
@@ -226,6 +228,7 @@ void loop() {
   }
   gDisplay.writeDigitRaw(2, dots);
 
+  // Control display luminosity
   if (rtcHours > 22 || rtcHours < 8) {
     if (gAppsActive) {
       // blink, blink, time to stop gaming!
