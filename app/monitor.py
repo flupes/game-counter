@@ -1,4 +1,5 @@
 import time
+import datetime
 import serial
 import psutil
 import os
@@ -10,8 +11,10 @@ dev.write_timeout = 3
 
 # DEBUG = True
 DEBUG = False
+# testHour = 2
+testHour = None
 
-RECONNECT_WAIT = 30
+RECONNECT_WAIT = 60
 UPDATE_PERIOD = 10
 PROCESSES_MONITORED = {
   1: 'wsl.exe',
@@ -65,15 +68,31 @@ while (not stopped):
     connected = True
     updates = 0
     while (connected):
-      updates += 1
-      status = get_process_status()
-      if DEBUG:
-        print_status(status)
+      if updates % 6 == 0:
+        # send hour command
+        if testHour:
+          hour = testHour
+          testHour += 1
+        else:
+          now = datetime.datetime.now()
+          hour = now.hour
+        cmd = (hour << 1) | 0x81
+        if DEBUG:
+          print("hour:", now.hour)
+        else:
+          dev.write(bytes([cmd]))
+        print("wrote hour:", cmd)
       else:
-        dev.write(bytes([status]))
-      print('wrote', status)
+        # send app status
+        status = get_process_status()
+        if DEBUG:
+          print_status(status)
+        else:
+          dev.write(bytes([status]))
+        print('wrote status:', status)
+      updates += 1
       time.sleep(UPDATE_PERIOD)
-      if updates > 12:
+      if updates > 60:
         connected = False
         stopped = True
   except serial.SerialTimeoutException as timeout:
