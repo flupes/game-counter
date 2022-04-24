@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <RTCZero.h>
 
 #include "Adafruit_LEDBackpack.h"
 #include "Adafruit_SPIFlash.h"
@@ -6,6 +7,7 @@
 Adafruit_FlashTransport_SPI gFlashTransport(SS1, SPI1);
 Adafruit_SPIFlash gFlash(&gFlashTransport);
 Adafruit_7segment gDisplay = Adafruit_7segment();
+RTCZero gRealTimeClock;
 
 const uint32_t kPageSize = 256;
 const uint32_t kPageStart = 16;
@@ -100,6 +102,10 @@ void setup() {
   gFlashIndex = kAddrStart;
   gAccumulatedMinutes = MinutesOnFlash(gFlashIndex);
 
+  gRealTimeClock.begin();
+  gRealTimeClock.setDate(1, 9, 4);
+  gRealTimeClock.setTime(0, 0, 0);
+
   delay(1000);
   Serial.begin(9600);
   delay(1000);
@@ -121,8 +127,10 @@ void loop() {
   static uint32_t lastAnim = millis();
 
   static uint8_t state(0);
+  static uint8_t lastHour(0);
   static bool toggle(false);
   static bool connected(false);
+  static bool dayRecorded(false);
 
   uint32_t now = millis();
 
@@ -131,8 +139,12 @@ void loop() {
       state = Serial.read();
       lastRead = now;
       connected = true;
-      if ((state & kAppCommandMask) == kAppCommandMask) {
-        // this is a "command"
+      if ((state & kAppCommandMask) == kAppCommandMask) {  // received command
+        uint8_t hours = (state >> 1) & 0x1F;
+        if (hours != lastHour) {
+          lastHour = hours;
+          gRealTimeClock.setTime(hours, 0, 0);
+        }
       } else {  // app status
         if ((state & kAppCounterMask) > 0) {
           if (!gAppsActive) {
@@ -145,11 +157,27 @@ void loop() {
         }
       }
     }
-    gDisplay.writeDigitRaw(2, 0x00);
   } else {
     connected = false;
   }
 
+  // Mark days to flash
+  uint8_t rtcHours = gRealTimeClock.getHours();
+  if (rtcHours == 3) {
+    if (!dayRecorded) {
+      uint32_t len = gFlash.writeBuffer(gFlashIndex, 0x00, 1);
+      gFlashIndex++;
+      if (len != 1) {
+        Error(4);
+      }
+      dailyMinutes = 0;
+      dayRecorded = true;
+    }
+  } else {
+    dayRecorded = false;
+  }
+
+  // Check app status
   if (gAppsActive) {
     uint32_t numMinutes = (now - startActive) / kMinutePeriodMs;
     if (numMinutes > lastMinute) {
@@ -197,6 +225,21 @@ void loop() {
     }
   }
   gDisplay.writeDigitRaw(2, dots);
+
+  if (rtcHours > 22 || rtcHours < 8) {
+    if (gAppsActive) {
+      // blink, blink, time to stop gaming!
+      gDisplay.setBrightness(15);
+      gDisplay.blinkRate(HT16K33_BLINK_2HZ);
+    } else {
+      // dim display
+      gDisplay.blinkRate(HT16K33_BLINK_OFF);
+      gDisplay.setBrightness(2);
+    }
+  } else {
+    gDisplay.blinkRate(HT16K33_BLINK_OFF);
+    gDisplay.setBrightness(12);
+  }
 
   gDisplay.writeDisplay();
   delay(20);
