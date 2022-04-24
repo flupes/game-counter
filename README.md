@@ -2,7 +2,10 @@
 
 Provides awareness of total accumulated game time with seven segment display counter.
 
-This is a physical alternative to software app tracking screen time. Rather than collecting a plethora of data and presenting elaborated statistics, this device displays a single number of the accumulated hours spent on gaming and a “daily” minute counter while in game.
+This is a physical alternative to software app tracking screen time. Rather than
+collecting a plethora of data and presenting elaborated statistics, this device
+displays a single number of the accumulated hours spent on gaming and a “daily”
+minute counter while in game.
 
 ## Concept
 
@@ -11,15 +14,22 @@ A simple desktop app sends if some apps are active via the USB/Serial port to an
 The app collects which processes are active periodically (10s TBR) and writes a single byte on the serial port. This byte contains “slots” for 6 different apps (1 per bit) we are interested to monitor.
 
 | Bit 7 | Bit 6 | Bit 5 | Bit 4 | Bit 3 | Bit 2 | Bit 1 | Bit 0 |
-| —- | —- | —- | —- | —- | —- | —- | —- |
+|:-----:|-------|-------|-------|-------|-------|-------|:-----:|
 |   0   | App 6 | App 5 | App 4 | App 3 | App 2 | App 1 |   0   |
 
   - App bit == 1 —> app is currently active
   - Status = 0 —> No monitored apps monitored is active
-  - Bit 0 and 7 should always be low (to make sure to differentiate with a writable flash byte)
+  - Bit 0 and 7 should always be low : this byte is written directly to flash, and we need to differentiate from writable bytes (0xFF).
 
 This is the most trivial communication protocol: a single command byte :-) 
 
+The host app also can also send "commands" to the microcontroller. Typically, it sends the hour of the day to allow write on flash that a days as passed or make smart decision regarding the display
+
+| Bit 7 |  Bit 6   |  Bit 5  |  Bit 4  |  Bit 3  |  Bit 2  |  Bit 1  | Bit 0 |
+|:-----:|:--------:|:-------:|:-------:|:-------:|:-------:|:-------:|:-----:|
+|   1   | Reserved | H bit 4 | H bit 3 | H bit 2 | H bit 1 | H bit 0 |   1   |
+
+  - H : Hour of the day with a 24h format
 ## Storing counts
 
 The system should not rely on some persistence mechanism of the desktop app to maintain a time count. The microcontroller stores the elapsed time on local flash. The chosen board (Itsy Betsy M0) has 2MB of SPI FLASH, and this large capacity allows to select and extremely simple scheme to store time elapsed.
