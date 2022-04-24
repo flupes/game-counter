@@ -18,6 +18,7 @@ const uint8_t kBuiltinLed = 13;
 
 // Only aggregate in the counter the apps active in the following slots
 const uint8_t kAppCounterMask = 0b00001010;
+const uint8_t kAppCommandMask = 0b10000001;
 
 uint32_t gFlashIndex(0);
 uint32_t gStartMs(0);
@@ -69,7 +70,6 @@ uint32_t MinutesOnFlash(uint32_t &index) {
   const uint32_t maxAddr = gFlash.numPages() * gFlash.pageSize() - 1;
   uint32_t minutes = 0;
   bool byteWritable = false;
-  while (!Serial) {};
   while (!byteWritable) {
     if (index > maxAddr) {
       Error(3);
@@ -106,7 +106,7 @@ void setup() {
 
   gDisplay.print(gFlashIndex - kAddrStart);
   gDisplay.writeDisplay();
-  delay(8000);
+  delay(2000);
 
   gStartMs = millis();
 }
@@ -118,9 +118,11 @@ void loop() {
   static uint32_t startActive = millis();
   static uint32_t lastFlip = millis();
   static uint32_t lastRead = millis();
+  static uint32_t lastAnim = millis();
 
   static uint8_t state(0);
   static bool toggle(false);
+  static bool connected(false);
 
   uint32_t now = millis();
 
@@ -128,7 +130,8 @@ void loop() {
     if (Serial.available()) {
       state = Serial.read();
       lastRead = now;
-      if ((state & 0b10000001) == 0b10000001) {
+      connected = true;
+      if ((state & kAppCommandMask) == kAppCommandMask) {
         // this is a "command"
       } else {  // app status
         if ((state & kAppCounterMask) > 0) {
@@ -143,17 +146,8 @@ void loop() {
       }
     }
     gDisplay.writeDigitRaw(2, 0x00);
-  } else {  // flips dots to show that we are waiting for data
-    if ((now - lastFlip) > 500) {
-      lastFlip = now;
-      toggle = !toggle;
-    }
-    gDisplay.drawColon(true);
-    if (toggle) {
-      gDisplay.writeDigitRaw(2, 0b00000100);
-    } else {
-      gDisplay.writeDigitRaw(2, 0b00001000);
-    }
+  } else {
+    connected = false;
   }
 
   if (gAppsActive) {
@@ -168,21 +162,42 @@ void loop() {
       dailyMinutes++;
       gAccumulatedMinutes++;
     }
-    gDisplay.print(dailyMinutes);
-    Wheel();
-    if ( now - lastRead > 40000 ) {
-      // comms timeout
+    if (now - lastAnim > 1000 / 6) {
+      gDisplay.print(dailyMinutes);
+      lastAnim = now;
+      Wheel();
+    }
+    if (now - lastRead > 40000) {  // comms timeout
       gAppsActive = false;
+      connected = false;
     }
   } else {
     gDisplay.writeDigitRaw(0, 0x0);
-    gDisplay.print(gAccumulatedMinutes+kMinuteOffset);
+    gDisplay.print(gAccumulatedMinutes + kMinuteOffset);
   }
+  // control the dots *after* the rest of the digits since the Adafruit
+  // library seems to clear them with prints.
+  uint8_t dots = 0x0;
+  if (connected) {
+    if (now - lastRead < 100) {
+      dots = 0b00010000;
+    }  // dot will be turned off from the default state otherwise
+  } else {
+    // flips dots to show that we are waiting for data
+    if ((now - lastFlip) > 500) {
+      lastFlip = now;
+      toggle = !toggle;
+    }
+    if (toggle) {
+      dots &= ~(1u << 3);
+      dots |= 1u << 2;
+    } else {
+      dots &= ~(1u << 2);
+      dots |= 1u << 3;
+    }
+  }
+  gDisplay.writeDigitRaw(2, dots);
 
   gDisplay.writeDisplay();
-  delay(100);
-  // digitalWrite(kBuiltinLed, HIGH);
-  // delay(200);
-  // digitalWrite(kBuiltinLed, LOW);
-  // delay(800);
+  delay(20);
 }
