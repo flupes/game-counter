@@ -199,9 +199,9 @@ void loop() {
       lastAnim = now;
       Wheel();
     }
-    lastDigitsFlip = now;
+    lastDisplayFlip = now;
   } else {
-    if ((now - lastDisplayFlip) > 1000 * 60) {
+    if ((now - lastDisplayFlip) > 1000 * 15) {
       lastDisplayFlip = now;
       displayToggle = !displayToggle;
     }
