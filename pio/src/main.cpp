@@ -13,13 +13,15 @@ const uint32_t kPageSize = 256;
 const uint32_t kPageStart = 16;
 const uint32_t kAddrStart = kPageSize * kPageStart;
 
-const uint32_t kMinutePeriodMs = 1000 * 10;  // to help testing with speedup
-const uint32_t kMinuteOffset = 4000;
+const uint32_t kMinutePeriodMs = 1000 * 60;  // to help testing with speedup
+const uint32_t kMinuteOffset = 4000 * 60;
 
 const uint8_t kBuiltinLed = 13;
 
 // Only aggregate in the counter the apps active in the following slots
-const uint8_t kAppCounterMask = 0b00001010;
+const uint8_t kAppCounterMask = 0b01111100;
+
+// Command mask
 const uint8_t kAppCommandMask = 0b10000001;
 
 uint32_t gFlashIndex(0);
@@ -122,13 +124,15 @@ void loop() {
   static uint32_t lastMinute(0);
 
   static uint32_t startActive = millis();
-  static uint32_t lastFlip = millis();
+  static uint32_t lastDotsFlip = millis();
+  static uint32_t lastDisplayFlip = millis();
   static uint32_t lastRead = millis();
   static uint32_t lastAnim = millis();
 
   static uint8_t state(0);
   static uint8_t lastHour(0);
-  static bool toggle(false);
+  static bool dotsToggle(false);
+  static bool displayToggle(false);
   static bool connected(false);
   static bool dayRecorded(false);
 
@@ -195,9 +199,19 @@ void loop() {
       lastAnim = now;
       Wheel();
     }
+    lastDigitsFlip = now;
   } else {
+    if ((now - lastDisplayFlip) > 1000 * 60) {
+      lastDisplayFlip = now;
+      displayToggle = !displayToggle;
+    }
     gDisplay.writeDigitRaw(0, 0x0);
-    gDisplay.print(gAccumulatedMinutes + kMinuteOffset);
+    if (displayToggle) {
+      gDisplay.print(dailyMinutes);
+      gDisplay.writeDigitAscii(0, 'd');
+    } else {
+      gDisplay.print((gAccumulatedMinutes + kMinuteOffset) / 60);
+    }
   }
 
   if (now - lastRead > 40000) {  // comms timeout
@@ -214,11 +228,11 @@ void loop() {
     }  // dot will be turned off from the default state otherwise
   } else {
     // flips dots to show that we are waiting for data
-    if ((now - lastFlip) > 500) {
-      lastFlip = now;
-      toggle = !toggle;
+    if ((now - lastDotsFlip) > 1000) {
+      lastDotsFlip = now;
+      dotsToggle = !dotsToggle;
     }
-    if (toggle) {
+    if (dotsToggle) {
       dots &= ~(1u << 3);
       dots |= 1u << 2;
     } else {
