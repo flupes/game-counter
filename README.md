@@ -30,13 +30,19 @@ This is the most trivial communication protocol: a single command byte :-)
 
 The host app also can also send "commands" to the microcontroller. Typically, it
 sends the hour of the day to allow write on flash that a days as passed or make
-smart decision regarding the display
+smart decision regarding the display. In addition, sending a minute code every 10 minutes allows to synchronize the on-board clock accurately.
 
-| Bit 7 |  Bit 6   |  Bit 5  |  Bit 4  |  Bit 3  |  Bit 2  |  Bit 1  | Bit 0 |
-|:-----:|:--------:|:-------:|:-------:|:-------:|:-------:|:-------:|:-----:|
-|   1   | Reserved | H bit 4 | H bit 3 | H bit 2 | H bit 1 | H bit 0 |   1   |
+| Bit 7 | Bit 6 |  Bit 5  |  Bit 4  |  Bit 3  |  Bit 2  |  Bit 1  | Bit 0 |
+|:-----:|:-----:|:-------:|:-------:|:-------:|:-------:|:-------:|:-----:|
+|   1   |   0   | H bit 4 | H bit 3 | H bit 2 | H bit 1 | H bit 0 |   1   |
+|   1   |   0   | M bit 4 | M bit 3 | M bit 2 | M bit 1 | M bit 0 |   1   |
 
-  - H : Hour of the day with a 24h format
+  - H[5] < 24: Hour of the day with a 24h format, leave minutes + seconds
+  - M[5] > 24: Minute of the hour, reset seconds
+
+| M Code  | 25 | 26 | 27 | 28 | 29 | 30 |
+|---------|----|----|----|----|----|----|
+| Minutes | 7  | 17 | 27 | 37 | 47 | 57 |
 ## Storing counts
 
 The system should not rely on some persistence mechanism of the desktop app to

@@ -1,4 +1,5 @@
 import datetime
+import schedule
 import logging
 import serial
 import psutil
@@ -13,6 +14,7 @@ dev.write_timeout = 3
 
 RECONNECT_WAIT = 60
 UPDATE_PERIOD = 10
+
 PROCESSES_MONITORED = {
   1: 'discord.exe',
   2: 'valorant.exe',
@@ -51,47 +53,64 @@ def get_process_status():
       byte += 2**i
   return byte
 
-def monitor():
-  numtries = 0
-  while (not stopped):
-    try:
-      numtries += 1
-      logging.info('trying to open %s serial port #%s', dev.port, str(numtries))
-      if dev.is_open:
-        logging.info('serial port already opened')
-      else:
-        dev.open()
-        logging.info('serial port %s successfuly opened', dev.port)
-      connected = True
-      updates = 0
-      while (connected):
-        if updates % 6 == 0:
-          # send hour command
-          now = datetime.datetime.now()
-          hour = now.hour
-          cmd = (hour << 1) | 0x81
-          dev.write(bytes([cmd]))
-          logging.debug('wrote hour: %s', str(cmd))
-        else:
-          # send app status
-          status = get_process_status()
-          dev.write(bytes([status]))
-          logging.debug('wrote status: %s', str(status))
-        updates += 1
-        time.sleep(UPDATE_PERIOD)
-    except serial.SerialTimeoutException as timeout:
-      logging.critical(timeout)
-    except serial.SerialException as error:
-      logging.critical(error)
-    if dev:
-      dev.close()
-    time.sleep(RECONNECT_WAIT)
+def set_hours():
+  global dev
+  cmd = (datetime.datetime.now().hour << 1) | 0x81
+  dev.write(bytes([cmd]))
+  logging.debug('wrote hours: %s', str(cmd))
 
-dev.close()
+def set_minutes():
+  global dev
+  minutes = datetime.datetime.now().minute
+  if minutes >= 7:
+    minutes -= 7
+  cmd = ( ( 25 + minutes // 10 ) << 1) | 0x81
+  dev.write(bytes([cmd]))
+  logging.debug('wrote minutes: %s', str(cmd))
+
+def update_status():
+  global dev
+  status = get_process_status()
+  dev.write(bytes([status]))
+  logging.debug('wrote status: %s', str(status))
+
+def register_tasks():
+  schedule.every(UPDATE_PERIOD).seconds.do(update_status)
+  schedule.every(3).minutes.at(":15").do(set_hours)
+  schedule.every().hour.at(":07").do(set_minutes)
+  schedule.every().hour.at(":17").do(set_minutes)
+  schedule.every().hour.at(":27").do(set_minutes)
+  schedule.every().hour.at(":37").do(set_minutes)
+  schedule.every().hour.at(":47").do(set_minutes)
+  schedule.every().hour.at(":57").do(set_minutes)
 
 if __name__ == "__main__":
-  logging.basicConfig(filename='.\monitor.log', filemode='w', level=logging.DEBUG)
+  logging.basicConfig(filename='.\monitor.log', filemode='w', \
+    format='%(asctime)s %(message)s', level=logging.DEBUG)
+  
   if len(sys.argv) > 1:
     dev.port = sys.argv[1]
+
+  schedule_logger = logging.getLogger('schedule')
+  schedule_logger.setLevel(level=logging.WARNING)
+
   stopped = False
-  monitor()
+  while not stopped:
+    try:
+      logging.info('trying to open serial port ' + dev.port)
+      dev.open()
+      logging.info(dev.port + ' sucessfully opened')
+      register_tasks()
+      logging.info('schedule registered')
+      while True:
+        schedule.run_pending()
+        time.sleep(1)
+    except serial.SerialTimeoutException as timeout:
+      logging.critical('write timeout ' + str(timeout))
+    except serial.SerialException as error:
+      logging.critical('serial error: ' + str(error))
+    dev.close()
+    logging.info('closed serial port ' + dev.port)
+    time.sleep(RECONNECT_WAIT)
+  
+  dev.close()
