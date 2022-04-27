@@ -140,65 +140,88 @@ void ControlDots(uint32_t now, uint32_t lastRead, bool connected, bool colon) {
   gDisplay.writeDigitRaw(2, dots);
 }
 
-void DisplayTime() {
+bool DisplayTime() {
   const uint8_t hours = gRealTimeClock.getHours();
   const uint8_t minutes = gRealTimeClock.getMinutes();
   DisplayTwoDigits(0, hours);
   DisplayTwoDigits(3, minutes);
+  return true;
 }
 
-void DisplayDaily() {
-  if (gDailyMinutes < 1000) {
-    gDisplay.print(gDailyMinutes);
+bool DisplayMinutes() {
+  bool colon = false;
+  const uint8_t hours = gDailyMinutes / 60;
+  const uint8_t minutes = gDailyMinutes % 60;
+  if (hours > 0) {
+    gDisplay.writeDigitNum(1, hours);
+    colon = true;
+  }
+  else {
+    gDisplay.writeDigitAscii(1, ' ');
+  }
+  DisplayTwoDigits(3, minutes);
+  return colon;
+}
+
+bool DisplayDaily() {
+  bool colon = false;
+  if (gDailyMinutes < 10 * 60) {
+    colon = DisplayMinutes();
     gDisplay.writeDigitAscii(0, 'd');
   } else {
     gDisplay.print("dout");
   }
+  return colon;
 }
 
-void DisplayTotal() {
+bool DisplayTotal() {
   const uint32_t hours = (gAccumulatedMinutes + kMinuteOffset) / 60;
   if (hours < 10000) {
     gDisplay.print(hours);
   } else {
     gDisplay.print("StoP");
   }
+  return false;
 }
-void DisplayActive(uint32_t now) {
+
+bool DisplayActive(uint32_t now) {
   static uint8_t const pattern[] = {0b00000011, 0b00000110, 0b00001100,
                                     0b00011000, 0b00110000, 0b00100001};
   static uint8_t counter = 0;
   static uint32_t lastAnim = millis();
+  bool colon = false;
 
-  if (gDailyMinutes < 900) {
-    gDisplay.print(gDailyMinutes);
-    if (now - lastAnim > 1000 / 6) {
-      lastAnim = now;
-      counter++;
-      if (counter >= sizeof(pattern)) {
-        counter = 0;
-      }
-    }
+  if (gDailyMinutes < 10 * 60) {
+    colon = DisplayMinutes();
   } else {
     gDisplay.print("bad");
   }
+  if (now - lastAnim > 1000 / 6) {
+    lastAnim = now;
+    counter++;
+    if (counter >= sizeof(pattern)) {
+      counter = 0;
+    }
+  }
   gDisplay.writeDigitRaw(0, pattern[counter]);
+  return colon;
 }
 
-void UpdateDisplay(uint32_t now, bool active) {
+bool UpdateDisplay(uint32_t now, bool active) {
   static uint32_t lastChange = millis();
-
+  bool colon = false;
+  // gDisplay.clear();
   if (active) {
     switch (gDisplayMode) {
       case DisplayMode::TIME:
-        DisplayTime();
+        colon = DisplayTime();
         if (now - lastChange > 3 * 1000) {
           lastChange = now;
           gDisplayMode = DisplayMode::ACTIVE;
         }
         break;
       case DisplayMode::ACTIVE:
-        DisplayActive(now);
+        colon = DisplayActive(now);
         if (now - lastChange > 12 * 1000) {
           lastChange = now;
           gDisplayMode = DisplayMode::TIME;
@@ -210,21 +233,21 @@ void UpdateDisplay(uint32_t now, bool active) {
   } else {
     switch (gDisplayMode) {
       case DisplayMode::TIME:
-        DisplayTime();
+        colon = DisplayTime();
         if (now - lastChange > 8 * 1000) {
           lastChange = now;
           gDisplayMode = DisplayMode::TOTAL;
         }
         break;
       case DisplayMode::TOTAL:
-        DisplayTotal();
+        colon = DisplayTotal();
         if (now - lastChange > 5 * 1000) {
           lastChange = now;
           gDisplayMode = DisplayMode::DAILY;
         }
         break;
       case DisplayMode::DAILY:
-        DisplayDaily();
+        colon = DisplayDaily();
         if (now - lastChange > 2 * 1000) {
           lastChange = now;
           gDisplayMode = DisplayMode::TIME;
@@ -234,6 +257,50 @@ void UpdateDisplay(uint32_t now, bool active) {
         gDisplayMode = DisplayMode::TIME;
     }
   }
+  return colon;
+}
+
+void ControlBrightness(uint8_t hour, bool active) {
+  // Control display luminosity
+  if (hour > 22 || hour < 8) {
+    if (active) {
+      // blink, blink, time to stop gaming!
+      gDisplay.setBrightness(15);
+      gDisplay.blinkRate(HT16K33_BLINK_1HZ);
+    } else {
+      // dim display
+      gDisplay.blinkRate(HT16K33_BLINK_OFF);
+      gDisplay.setBrightness(1);
+    }
+  } else {
+    gDisplay.blinkRate(HT16K33_BLINK_OFF);
+    gDisplay.setBrightness(10);
+  }
+}
+
+void AnnounceOnce() {
+  static bool welcomed(false);
+  if (!welcomed) {
+    Serial.println("Game Counter Started :-)");
+    Serial.print("Minutes on flash = ");
+    Serial.println(gAccumulatedMinutes);
+    welcomed = true;
+  }
+}
+
+void AdjustClock(uint32_t disconnectedMillis, uint32_t disconnectedSeconds,
+                 float driftFactor) {
+  uint32_t millisOffset = millis() - disconnectedMillis;
+  // this will not work after 49 day without a time fix from the host ;-)
+  float secondsOffset = round(driftFactor * (float)(millisOffset) / 1000.0f);
+  uint32_t correctedEpoch = disconnectedSeconds + (uint32_t)(secondsOffset);
+  gRealTimeClock.setEpoch(correctedEpoch);
+  // Serial.print("RTC ADJUST: millisOffset=");
+  // Serial.print(millisOffset);
+  // Serial.print(" secondsOffset=");
+  // Serial.print(secondsOffset);
+  // Serial.print(" correctedEpoch=");
+  // Serial.println(correctedEpoch);
 }
 
 void setup() {
@@ -272,11 +339,19 @@ void loop() {
 
   static uint32_t startActive = millis();
   static uint32_t lastRead = millis();
+  static uint32_t lastCorrection = millis();
+  static uint32_t startMeasureMillis = millis();
+  static uint32_t disconnectedMillis = startMeasureMillis;
+  static uint32_t startMeasureSeconds = gRealTimeClock.getEpoch();
+  static uint32_t disconnectedSeconds = startMeasureSeconds;
+  static float driftFactor = 1.0f;
 
   static uint8_t appStatus(0);
   static bool active(false);
   static bool connected(false);
   static bool dayRecorded(false);
+  static bool measuringDrift(false);
+  static bool hourSet(false);
 
   uint32_t now = millis();
 
@@ -285,18 +360,45 @@ void loop() {
       uint8_t msg = Serial.read();
       lastRead = now;
       connected = true;
-      if ((msg & kAppCommandMask) == kAppCommandMask) {  // received command
+      AnnounceOnce();
+      if ((msg & kAppCommandMask) == kAppCommandMask) {
+        // received command
         uint8_t code = (msg >> 1) & 0x1F;
         if ((code > 24) & (code < 31)) {
           gRealTimeClock.setSeconds(0);
           gRealTimeClock.setMinutes(10 * (code - 25) + 7);
+          lastCorrection = now;
+          if (hourSet) {
+            uint32_t seconds = gRealTimeClock.getEpoch();
+            if (!measuringDrift) {
+              startMeasureSeconds = seconds;
+              startMeasureMillis = now;
+              measuringDrift = true;
+            } else {
+              if ((seconds - startMeasureSeconds) > 5 * 60) {
+                // at least 40 min for new estimation
+                driftFactor = 1000.0f * (float)(seconds - startMeasureSeconds) /
+                              (float)(now - startMeasureMillis);
+                Serial.print("DRIFT MEASURE: ");
+                Serial.print(seconds - startMeasureSeconds);
+                Serial.print(" --> ");
+                Serial.println(driftFactor, 9);
+              }
+            }
+          }  // command code = minutes
         } else if (code < 24) {
+          // command code = hours
           gRealTimeClock.setHours(code);
+          hourSet = true;
         } else if (code == 31) {
           // PrintFlash(gFlashIndex-100ul);
           PrintFlash();
+        } else {
+          // code == 24 --> for debugging
+          AdjustClock(disconnectedMillis, disconnectedSeconds, driftFactor);
         }
-      } else {  // app status
+      } else {
+        // received app status
         appStatus = msg;
         if ((appStatus & kAppCounterMask) > 0) {
           if (!active) {
@@ -315,6 +417,8 @@ void loop() {
   if (now - lastRead > 50000) {  // comms timeout
     active = false;
     connected = false;
+    disconnectedSeconds = gRealTimeClock.getEpoch();
+    disconnectedMillis = millis();
   }
 
   // Mark new day to flash / reset daily counter
@@ -348,25 +452,18 @@ void loop() {
       gAccumulatedMinutes++;
     }
   }
-
-  UpdateDisplay(now, active);
-  ControlDots(now, lastRead, connected, gDisplayMode == DisplayMode::TIME);
-
-  // Control display luminosity
-  if (rtcHours > 22 || rtcHours < 8) {
-    if (active) {
-      // blink, blink, time to stop gaming!
-      gDisplay.setBrightness(15);
-      gDisplay.blinkRate(HT16K33_BLINK_1HZ);
-    } else {
-      // dim display
-      gDisplay.blinkRate(HT16K33_BLINK_OFF);
-      gDisplay.setBrightness(1);
+  if (!connected) {
+    measuringDrift = false;
+    hourSet = false;
+    if ((now - lastCorrection) > 3 * 60 * 1000) {
+      AdjustClock(disconnectedMillis, disconnectedSeconds, driftFactor);
+      lastCorrection = now;
     }
-  } else {
-    gDisplay.blinkRate(HT16K33_BLINK_OFF);
-    gDisplay.setBrightness(10);
   }
+
+  bool colon = UpdateDisplay(now, active);
+  ControlDots(now, lastRead, connected, colon);
+  ControlBrightness(rtcHours, active);
 
   gDisplay.writeDisplay();
   delay(20);
