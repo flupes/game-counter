@@ -4,6 +4,7 @@ import sys
 dev = serial.Serial()
 dev.port = 'COM8'
 dev.baudrate = 9600
+dev.timeout = 0.1
 dev.write_timeout = 3
 
 def write_byte(b):
@@ -12,11 +13,12 @@ def write_byte(b):
   dev.close()
 
 if __name__ == "__main__":
-  if len(sys.argv) != 3:
-    print(sys.argv[0], "STATUS=0|CMD=1 code", )
+  if len(sys.argv) < 3:
+    print(sys.argv[0], "STATUS=0|CMD=1 code [monitor]", )
     exit(-1)
   try:
     msgtype = int(sys.argv[1])
+    monitor = len(sys.argv) > 3
     code = int(sys.argv[2])
   except ValueError:
     print("invalid arguments!")
@@ -35,3 +37,11 @@ if __name__ == "__main__":
   else:
     print("invalid type of message")
     exit(-4)
+
+if monitor:
+  dev.open()
+  while True:
+    msg = dev.readline()
+    if msg:
+      print(msg.decode("utf-8").rstrip())
+  dev.close()
