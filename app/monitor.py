@@ -10,6 +10,7 @@ import os
 dev = serial.Serial()
 dev.port = 'COM8'
 dev.baudrate = 9600
+dev.timeout = 1
 dev.write_timeout = 3
 
 RECONNECT_WAIT = 60
@@ -104,7 +105,10 @@ if __name__ == "__main__":
       logging.info('schedule registered')
       while True:
         schedule.run_pending()
-        time.sleep(1)
+        msg = dev.readline()
+        if msg:
+          logging.info("RECV: "+msg.decode("utf-8").rstrip())
+          time.sleep(1)
     except serial.SerialTimeoutException as timeout:
       logging.critical('write timeout ' + str(timeout))
     except serial.SerialException as error:
