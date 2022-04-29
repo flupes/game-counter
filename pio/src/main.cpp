@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <RTCZero.h>
+#include <utils.h>
 
 #include "Adafruit_LEDBackpack.h"
 #include "Adafruit_SPIFlash.h"
@@ -9,12 +10,20 @@ Adafruit_SPIFlash gFlash(&gFlashTransport);
 Adafruit_7segment gDisplay = Adafruit_7segment();
 RTCZero gRealTimeClock;
 
+// can get the page size from the library, but use as a safety check at startup
 const uint32_t kPageSize = 256;
+// leave some pages for potential settings or indexing
 const uint32_t kPageStart = 16;
 const uint32_t kAddrStart = kPageSize * kPageStart;
 
-const uint32_t kMinutePeriodMs = 1000 * 60;  // to help testing with speedup
+// should be 1min in ms, but can be descreased to help testing with speedup
+const uint32_t kMinutePeriodMs = 1000 * 60;
+
+// Let say we already wasted a lot of gaming hours
 const uint32_t kMinuteOffset = 4000 * 60;
+
+// const float kDefaultDriftFactor = 1.0065;
+const float kDefaultDriftFactor = 1.0010;
 
 const uint8_t kBuiltinLed = 13;
 
@@ -25,12 +34,7 @@ const uint8_t kAppCounterMask = 0b01111100;
 const uint8_t kAppCommandMask = 0b10000001;
 
 uint32_t gFlashIndex(0);
-uint32_t gStartMs(0);
 uint32_t gAccumulatedMinutes(0);
-uint32_t gDailyMinutes(0);
-
-enum class DisplayMode { OFF = 0, TIME, DAILY, TOTAL, ACTIVE };
-DisplayMode gDisplayMode = DisplayMode::TIME;
 
 void Error(uint8_t num) {
   while (true) {
@@ -111,13 +115,13 @@ void DisplayTwoDigits(uint8_t offset, uint8_t number) {
   gDisplay.writeDigitNum(offset + 1, digit2);
 }
 
-void ControlDots(uint32_t now, uint32_t lastRead, bool connected, bool colon) {
+void ControlDots(uint32_t now, uint32_t last, bool connected, bool colon) {
   static uint32_t lastDotsFlip = millis();
   static bool dotsToggle(false);
 
   uint8_t dots = 0x0;
   if (connected) {
-    if (now - lastRead < 100) {
+    if (now - last < 100) {
       dots = 0b00010000;
     }  // dot will be turned off from the default state otherwise
   } else {
@@ -148,25 +152,24 @@ bool DisplayTime() {
   return true;
 }
 
-bool DisplayMinutes() {
+bool DisplayMinutes(uint32_t elapsedMinutes) {
   bool colon = false;
-  const uint8_t hours = gDailyMinutes / 60;
-  const uint8_t minutes = gDailyMinutes % 60;
+  const uint8_t hours = elapsedMinutes / 60;
+  const uint8_t minutes = elapsedMinutes % 60;
   if (hours > 0) {
     gDisplay.writeDigitNum(1, hours);
     colon = true;
-  }
-  else {
+  } else {
     gDisplay.writeDigitAscii(1, ' ');
   }
   DisplayTwoDigits(3, minutes);
   return colon;
 }
 
-bool DisplayDaily() {
+bool DisplayDaily(uint32_t elapsedMinutes) {
   bool colon = false;
-  if (gDailyMinutes < 10 * 60) {
-    colon = DisplayMinutes();
+  if (elapsedMinutes < 10 * 60) {
+    colon = DisplayMinutes(elapsedMinutes);
     gDisplay.writeDigitAscii(0, 'd');
   } else {
     gDisplay.print("dout");
@@ -174,8 +177,8 @@ bool DisplayDaily() {
   return colon;
 }
 
-bool DisplayTotal() {
-  const uint32_t hours = (gAccumulatedMinutes + kMinuteOffset) / 60;
+bool DisplayTotal(uint32_t totalMinutes) {
+  const uint32_t hours = (totalMinutes + kMinuteOffset) / 60;
   if (hours < 10000) {
     gDisplay.print(hours);
   } else {
@@ -184,15 +187,15 @@ bool DisplayTotal() {
   return false;
 }
 
-bool DisplayActive(uint32_t now) {
+bool DisplayActive(uint32_t elapsedMinutes, uint32_t now) {
   static uint8_t const pattern[] = {0b00000011, 0b00000110, 0b00001100,
                                     0b00011000, 0b00110000, 0b00100001};
   static uint8_t counter = 0;
   static uint32_t lastAnim = millis();
   bool colon = false;
 
-  if (gDailyMinutes < 10 * 60) {
-    colon = DisplayMinutes();
+  if (elapsedMinutes < 10 * 60) {
+    colon = DisplayMinutes(elapsedMinutes);
   } else {
     gDisplay.print("bad");
   }
@@ -207,54 +210,57 @@ bool DisplayActive(uint32_t now) {
   return colon;
 }
 
-bool UpdateDisplay(uint32_t now, bool active) {
+enum class DisplayMode { OFF = 0, TIME, DAILY, TOTAL, ACTIVE };
+
+bool UpdateDisplay(uint32_t elapsedMinutes, uint32_t totalMinutes, uint32_t now, bool active) {
+  static DisplayMode mode = DisplayMode::TIME;
   static uint32_t lastChange = millis();
   bool colon = false;
   // gDisplay.clear();
   if (active) {
-    switch (gDisplayMode) {
+    switch (mode) {
       case DisplayMode::TIME:
         colon = DisplayTime();
         if (now - lastChange > 3 * 1000) {
           lastChange = now;
-          gDisplayMode = DisplayMode::ACTIVE;
+          mode = DisplayMode::ACTIVE;
         }
         break;
       case DisplayMode::ACTIVE:
-        colon = DisplayActive(now);
+        colon = DisplayActive(elapsedMinutes, now);
         if (now - lastChange > 12 * 1000) {
           lastChange = now;
-          gDisplayMode = DisplayMode::TIME;
+          mode = DisplayMode::TIME;
         }
         break;
       default:  // make sure to get in one of the two accepted states
-        gDisplayMode = DisplayMode::TIME;
+        mode = DisplayMode::TIME;
     }
   } else {
-    switch (gDisplayMode) {
+    switch (mode) {
       case DisplayMode::TIME:
         colon = DisplayTime();
-        if (now - lastChange > 8 * 1000) {
+        if (now - lastChange > 5 * 1000) {
           lastChange = now;
-          gDisplayMode = DisplayMode::TOTAL;
+          mode = DisplayMode::TOTAL;
         }
         break;
       case DisplayMode::TOTAL:
-        colon = DisplayTotal();
-        if (now - lastChange > 5 * 1000) {
+        colon = DisplayTotal(totalMinutes);
+        if (now - lastChange > 8 * 1000) {
           lastChange = now;
-          gDisplayMode = DisplayMode::DAILY;
+          mode = DisplayMode::DAILY;
         }
         break;
       case DisplayMode::DAILY:
-        colon = DisplayDaily();
+        colon = DisplayDaily(elapsedMinutes);
         if (now - lastChange > 2 * 1000) {
           lastChange = now;
-          gDisplayMode = DisplayMode::TIME;
+          mode = DisplayMode::TIME;
         }
         break;
       default:  // make sure to get in one of the two accepted states
-        gDisplayMode = DisplayMode::TIME;
+        mode = DisplayMode::TIME;
     }
   }
   return colon;
@@ -288,19 +294,20 @@ void AnnounceOnce() {
   }
 }
 
-void AdjustClock(uint32_t disconnectedMillis, uint32_t disconnectedSeconds,
-                 float driftFactor) {
-  uint32_t millisOffset = millis() - disconnectedMillis;
+void AdjustClock(uint32_t refMillis, uint32_t refSeconds, float driftFactor) {
+  uint32_t millisOffset = millis() - refMillis;
   // this will not work after 49 day without a time fix from the host ;-)
   float secondsOffset = round(driftFactor * (float)(millisOffset) / 1000.0f);
-  uint32_t correctedEpoch = disconnectedSeconds + (uint32_t)(secondsOffset);
-  gRealTimeClock.setEpoch(correctedEpoch);
-  // Serial.print("RTC ADJUST: millisOffset=");
-  // Serial.print(millisOffset);
-  // Serial.print(" secondsOffset=");
-  // Serial.print(secondsOffset);
-  // Serial.print(" correctedEpoch=");
+  uint32_t correctedEpoch = refSeconds + (uint32_t)(secondsOffset);
+  // Serial.print("currentEpoch   = ");
+  // Serial.println(gRealTimeClock.getEpoch());
+  // Serial.print("millisOffset   = ");
+  // Serial.println(millisOffset);
+  // Serial.print("secondsOffset  = ");
+  // Serial.println(secondsOffset);
+  // Serial.print("correctedEpoch = ");
   // Serial.println(correctedEpoch);
+  gRealTimeClock.setEpoch(correctedEpoch);
 }
 
 void setup() {
@@ -331,27 +338,26 @@ void setup() {
   gDisplay.writeDisplay();
   delay(3000);
 
-  gStartMs = millis();
 }
 
 void loop() {
   static uint32_t lastMinute(0);
-
-  static uint32_t startActive = millis();
-  static uint32_t lastRead = millis();
-  static uint32_t lastCorrection = millis();
-  static uint32_t startMeasureMillis = millis();
-  static uint32_t disconnectedMillis = startMeasureMillis;
-  static uint32_t startMeasureSeconds = gRealTimeClock.getEpoch();
-  static uint32_t disconnectedSeconds = startMeasureSeconds;
-  static float driftFactor = 1.0f;
+  static uint32_t dailyMinutes(0);
+  static uint32_t lastTimeFromHostMillis(0);
+  static uint32_t lastTimeFromHostSeconds(0);
+  static uint32_t lastCorrection(0);
+  static uint32_t startActive(0);
+  static uint32_t lastRead(0);
 
   static uint8_t appStatus(0);
+  static uint8_t cachedHours(100);
   static bool active(false);
   static bool connected(false);
   static bool dayRecorded(false);
-  static bool measuringDrift(false);
-  static bool hourSet(false);
+  static bool offlineDriftMeasured(true);  // at startup we cannot measure drift
+
+  static WeightedAverage<float, 5> driftFactors(kDefaultDriftFactor, 9.0 * 3.6);
+  static float offlineDriftFactor = driftFactors.Compute();
 
   uint32_t now = millis();
 
@@ -365,37 +371,42 @@ void loop() {
         // received command
         uint8_t code = (msg >> 1) & 0x1F;
         if ((code > 24) & (code < 31)) {
-          gRealTimeClock.setSeconds(0);
-          gRealTimeClock.setMinutes(10 * (code - 25) + 7);
-          lastCorrection = now;
-          if (hourSet) {
-            uint32_t seconds = gRealTimeClock.getEpoch();
-            if (!measuringDrift) {
-              startMeasureSeconds = seconds;
-              startMeasureMillis = now;
-              measuringDrift = true;
-            } else {
-              if ((seconds - startMeasureSeconds) > 5 * 60) {
-                // at least 40 min for new estimation
-                driftFactor = 1000.0f * (float)(seconds - startMeasureSeconds) /
-                              (float)(now - startMeasureMillis);
-                Serial.print("DRIFT MEASURE: ");
-                Serial.print(seconds - startMeasureSeconds);
-                Serial.print(" --> ");
-                Serial.println(driftFactor, 9);
-              }
+          if (cachedHours < 24) {
+            uint32_t previousSeconds = gRealTimeClock.getEpoch();
+            gRealTimeClock.setSeconds(0);
+            gRealTimeClock.setMinutes(10 * (code - 25) + 7);
+            gRealTimeClock.setHours(cachedHours);
+            uint32_t currentSeconds = gRealTimeClock.getEpoch();
+            if (!offlineDriftMeasured && lastTimeFromHostSeconds > 0) {
+              const double elapsedMillis = (float)(now - lastTimeFromHostMillis);
+              const double elapsedRtc =
+                  (float)(previousSeconds - lastTimeFromHostSeconds) / offlineDriftFactor;
+              const double elapsedHost = (float)(currentSeconds - lastTimeFromHostSeconds);
+              const double factor =
+                  1000.0f * elapsedHost * elapsedHost / (elapsedMillis * elapsedRtc);
+              Serial.print("DRIFT MEASURE: elapsedMillis=");
+              Serial.print(elapsedMillis);
+              Serial.print(", elapsedRtc=");
+              Serial.print(elapsedRtc);
+              Serial.print(", elapsedHost=");
+              Serial.println(elapsedHost);
+              Serial.print("previousFactor=");
+              Serial.print(offlineDriftFactor, 6);
+              offlineDriftFactor = driftFactors.AddSample(
+                  (float)(clamp((float)factor, 0.99f, 1.01f)), elapsedHost / 1000.0f);
+              offlineDriftMeasured = true;
+              Serial.print(" --> correctionFactor=");
+              Serial.println(offlineDriftFactor, 6);
             }
+            lastTimeFromHostSeconds = currentSeconds;
+            lastTimeFromHostMillis = now;
           }  // command code = minutes
         } else if (code < 24) {
           // command code = hours
-          gRealTimeClock.setHours(code);
-          hourSet = true;
+          cachedHours = code;
         } else if (code == 31) {
           // PrintFlash(gFlashIndex-100ul);
           PrintFlash();
-        } else {
-          // code == 24 --> for debugging
-          AdjustClock(disconnectedMillis, disconnectedSeconds, driftFactor);
         }
       } else {
         // received app status
@@ -414,24 +425,23 @@ void loop() {
   } else {
     connected = false;
   }
-  if (now - lastRead > 50000) {  // comms timeout
+  if (now - lastRead > 50 * 1000) {  // comms timeout
     active = false;
     connected = false;
-    disconnectedSeconds = gRealTimeClock.getEpoch();
-    disconnectedMillis = millis();
+    lastCorrection = now;
   }
 
   // Mark new day to flash / reset daily counter
   uint8_t rtcHours = gRealTimeClock.getHours();
   if (rtcHours == 3) {
-    if (!dayRecorded) {
+    if (!dayRecorded && lastTimeFromHostSeconds > 0) {
       const uint8_t newday = 0x00;
       uint32_t len = gFlash.writeBuffer(gFlashIndex, &newday, 1);
       gFlashIndex++;
       if (len != 1) {
         Error(4);
       }
-      gDailyMinutes = 0;
+      dailyMinutes = 0;
       dayRecorded = true;
     }
   } else {
@@ -448,20 +458,23 @@ void loop() {
         Error(5);
       }
       lastMinute = numMinutes;
-      gDailyMinutes++;
+      dailyMinutes++;
       gAccumulatedMinutes++;
     }
   }
   if (!connected) {
-    measuringDrift = false;
-    hourSet = false;
-    if ((now - lastCorrection) > 3 * 60 * 1000) {
-      AdjustClock(disconnectedMillis, disconnectedSeconds, driftFactor);
-      lastCorrection = now;
+    if (lastTimeFromHostSeconds > 0) {
+      // Only apply corrections if we were at least synched onece
+      offlineDriftMeasured = false;
+      cachedHours = 100;
+      if ((now - lastCorrection) > 3 * 60 * 1000) {
+        AdjustClock(lastTimeFromHostMillis, lastTimeFromHostSeconds, offlineDriftFactor);
+        lastCorrection = now;
+      }
     }
   }
 
-  bool colon = UpdateDisplay(now, active);
+  bool colon = UpdateDisplay(dailyMinutes, gAccumulatedMinutes, now, active);
   ControlDots(now, lastRead, connected, colon);
   ControlBrightness(rtcHours, active);
 
