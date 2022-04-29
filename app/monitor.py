@@ -56,9 +56,11 @@ def get_process_status():
 
 def set_hours():
   global dev
-  cmd = (datetime.datetime.now().hour << 1) | 0x81
-  dev.write(bytes([cmd]))
-  logging.debug('wrote hours: %s', str(cmd))
+  now = datetime.datetime.now()
+  if now.minute > 7: # avoid edge conditions after offline periods
+    cmd = (now.hour << 1) | 0x81
+    dev.write(bytes([cmd]))
+    logging.debug('wrote hours: %s', str(cmd))
 
 def set_minutes():
   global dev
