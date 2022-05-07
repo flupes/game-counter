@@ -14,6 +14,7 @@ RTCZero gRealTimeClock;
 const uint32_t kPageSize = 256;
 // leave some pages for potential settings or indexing
 const uint32_t kPageStart = 16;
+// const uint32_t kPageStart = 32; // 2 BLOCKS, each block is 16 pages
 const uint32_t kAddrStart = kPageSize * kPageStart;
 
 // should be 1min in ms, but can be descreased to help testing with speedup
@@ -22,8 +23,7 @@ const uint32_t kMinutePeriodMs = 1000 * 60;
 // Let say we already wasted a lot of gaming hours
 const uint32_t kMinuteOffset = 4000 * 60;
 
-// const float kDefaultDriftFactor = 1.0065;
-const float kDefaultDriftFactor = 1.0010;
+const float kDefaultDriftFactor = 1.007;
 
 const uint8_t kBuiltinLed = 13;
 
@@ -299,15 +299,29 @@ void AdjustClock(uint32_t refMillis, uint32_t refSeconds, float driftFactor) {
   // this will not work after 49 day without a time fix from the host ;-)
   float secondsOffset = round(driftFactor * (float)(millisOffset) / 1000.0f);
   uint32_t correctedEpoch = refSeconds + (uint32_t)(secondsOffset);
-  // Serial.print("currentEpoch   = ");
-  // Serial.println(gRealTimeClock.getEpoch());
-  // Serial.print("millisOffset   = ");
-  // Serial.println(millisOffset);
-  // Serial.print("secondsOffset  = ");
-  // Serial.println(secondsOffset);
-  // Serial.print("correctedEpoch = ");
-  // Serial.println(correctedEpoch);
   gRealTimeClock.setEpoch(correctedEpoch);
+}
+
+float ComputeDrift(uint32_t previousMillis,  uint32_t previousSeconds, uint32_t currentMillis,
+                   uint32_t rtcSeconds, uint32_t hostSeconds, float previousDriftFactor) {
+  static WeightedAverage<float, 5> driftFactors(kDefaultDriftFactor, 9.0 * 3.6);
+  const double elapsedMillis = (float)(currentMillis - previousMillis);
+  const double elapsedRtc = (float)(rtcSeconds - previousSeconds) / previousDriftFactor;
+  const double elapsedHost = (float)(hostSeconds - previousSeconds);
+  const double factor = 1000.0f * elapsedHost * elapsedHost / (elapsedMillis * elapsedRtc);
+  float updatedDriftFactor =
+      driftFactors.AddSample((float)(clamp((float)factor, 0.99f, 1.01f)), elapsedHost / 1000.0f);
+  Serial.print("DRIFT MEASURE: elapsedMillis=");
+  Serial.print(elapsedMillis);
+  Serial.print(", elapsedRtc=");
+  Serial.print(elapsedRtc);
+  Serial.print(", elapsedHost=");
+  Serial.println(elapsedHost);
+  Serial.print("previousFactor=");
+  Serial.print(previousDriftFactor, 6);
+  Serial.print(" --> correctionFactor=");
+  Serial.println(updatedDriftFactor, 6);
+  return updatedDriftFactor;
 }
 
 void setup() {
@@ -337,7 +351,6 @@ void setup() {
   gDisplay.print(gAccumulatedMinutes);
   gDisplay.writeDisplay();
   delay(3000);
-
 }
 
 void loop() {
@@ -355,9 +368,7 @@ void loop() {
   static bool connected(false);
   static bool dayRecorded(false);
   static bool offlineDriftMeasured(true);  // at startup we cannot measure drift
-
-  static WeightedAverage<float, 5> driftFactors(kDefaultDriftFactor, 9.0 * 3.6);
-  static float offlineDriftFactor = driftFactors.Compute();
+  static float offlineDriftFactor = kDefaultDriftFactor;
 
   uint32_t now = millis();
 
@@ -372,40 +383,25 @@ void loop() {
         uint8_t code = (msg >> 1) & 0x1F;
         if ((code > 24) & (code < 31)) {
           if (cachedHours < 24) {
-            uint32_t previousSeconds = gRealTimeClock.getEpoch();
+            uint32_t rtcSeconds = gRealTimeClock.getEpoch();
             gRealTimeClock.setSeconds(0);
             gRealTimeClock.setMinutes(10 * (code - 25) + 7);
             gRealTimeClock.setHours(cachedHours);
-            uint32_t currentSeconds = gRealTimeClock.getEpoch();
+            uint32_t hostSeconds = gRealTimeClock.getEpoch();
             if (!offlineDriftMeasured && lastTimeFromHostSeconds > 0) {
-              const double elapsedMillis = (float)(now - lastTimeFromHostMillis);
-              const double elapsedRtc =
-                  (float)(previousSeconds - lastTimeFromHostSeconds) / offlineDriftFactor;
-              const double elapsedHost = (float)(currentSeconds - lastTimeFromHostSeconds);
-              const double factor =
-                  1000.0f * elapsedHost * elapsedHost / (elapsedMillis * elapsedRtc);
-              Serial.print("DRIFT MEASURE: elapsedMillis=");
-              Serial.print(elapsedMillis);
-              Serial.print(", elapsedRtc=");
-              Serial.print(elapsedRtc);
-              Serial.print(", elapsedHost=");
-              Serial.println(elapsedHost);
-              Serial.print("previousFactor=");
-              Serial.print(offlineDriftFactor, 6);
-              offlineDriftFactor = driftFactors.AddSample(
-                  (float)(clamp((float)factor, 0.99f, 1.01f)), elapsedHost / 1000.0f);
+              offlineDriftFactor =
+                  ComputeDrift(lastTimeFromHostMillis, lastTimeFromHostSeconds, now, rtcSeconds,
+                               hostSeconds, offlineDriftFactor);
               offlineDriftMeasured = true;
-              Serial.print(" --> correctionFactor=");
-              Serial.println(offlineDriftFactor, 6);
             }
-            lastTimeFromHostSeconds = currentSeconds;
+            lastTimeFromHostSeconds = hostSeconds;
             lastTimeFromHostMillis = now;
           }  // command code = minutes
         } else if (code < 24) {
           // command code = hours
           cachedHours = code;
         } else if (code == 31) {
-          // PrintFlash(gFlashIndex-100ul);
+          // Get back the flash content
           PrintFlash();
         }
       } else {
