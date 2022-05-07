@@ -17,11 +17,11 @@ RECONNECT_WAIT = 60
 UPDATE_PERIOD = 10
 
 PROCESSES_MONITORED = {
-  1: 'discord.exe',
+  1: 'rocket league',
   2: 'valorant.exe',
   3: 'fortnite',
   4: 'minecraft',
-  6: 'msedge',
+  6: 'overwatch',
 }
 
 myusername = os.environ.get('COMPUTERNAME')+'\\'+os.environ.get('USERNAME')
