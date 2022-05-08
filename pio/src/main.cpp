@@ -1,24 +1,23 @@
 #include <Arduino.h>
-#include <RTCZero.h>
 #include <utils.h>
 
 #include "Adafruit_LEDBackpack.h"
 #include "Adafruit_SPIFlash.h"
+#include "RTClib.h"
 
 Adafruit_FlashTransport_SPI gFlashTransport(SS1, SPI1);
 Adafruit_SPIFlash gFlash(&gFlashTransport);
 Adafruit_7segment gDisplay = Adafruit_7segment();
-RTCZero gRealTimeClock;
+RTC_PCF8523 gRealTimeClock;
 
 // can get the page size from the library, but use as a safety check at startup
 const uint32_t kPageSize = 256;
-// leave some pages for potential settings or indexing
-const uint32_t kPageStart = 16;
-// const uint32_t kPageStart = 32; // 2 BLOCKS, each block is 16 pages
+// leave some blocks for potential settings or indexing
+const uint32_t kPageStart = 32;  // 2 BLOCKS, each block is 16 pages
 const uint32_t kAddrStart = kPageSize * kPageStart;
 
 // should be 1min in ms, but can be descreased to help testing with speedup
-const uint32_t kMinutePeriodMs = 1000 * 60;
+const uint32_t kMinutePeriodSeconds = 60;
 
 // Let say we already wasted a lot of gaming hours
 const uint32_t kMinuteOffset = 4000 * 60;
@@ -26,15 +25,20 @@ const uint32_t kMinuteOffset = 4000 * 60;
 const float kDefaultDriftFactor = 1.007;
 
 const uint8_t kBuiltinLed = 13;
+const uint8_t kSquareWavePin = 7;
 
 // Only aggregate in the counter the apps active in the following slots
-const uint8_t kAppCounterMask = 0b01111100;
+const uint8_t kAppCounterMask = 0b01111110;
 
 // Command mask
 const uint8_t kAppCommandMask = 0b10000001;
 
 uint32_t gFlashIndex(0);
 uint32_t gAccumulatedMinutes(0);
+
+const DateTime kAbitraryStart(2022, 04, 27);
+
+volatile bool gNewSecond = true;  // start to read time even before interrupt
 
 void Error(uint8_t num) {
   while (true) {
@@ -144,11 +148,9 @@ void ControlDots(uint32_t now, uint32_t last, bool connected, bool colon) {
   gDisplay.writeDigitRaw(2, dots);
 }
 
-bool DisplayTime() {
-  const uint8_t hours = gRealTimeClock.getHours();
-  const uint8_t minutes = gRealTimeClock.getMinutes();
-  DisplayTwoDigits(0, hours);
-  DisplayTwoDigits(3, minutes);
+bool DisplayTime(const DateTime &dt) {
+  DisplayTwoDigits(0, dt.hour());
+  DisplayTwoDigits(3, dt.minute());
   return true;
 }
 
@@ -212,7 +214,8 @@ bool DisplayActive(uint32_t elapsedMinutes, uint32_t now) {
 
 enum class DisplayMode { OFF = 0, TIME, DAILY, TOTAL, ACTIVE };
 
-bool UpdateDisplay(uint32_t elapsedMinutes, uint32_t totalMinutes, uint32_t now, bool active) {
+bool UpdateDisplay(uint32_t elapsedMinutes, uint32_t totalMinutes, uint32_t now, const DateTime &dt,
+                   bool active) {
   static DisplayMode mode = DisplayMode::TIME;
   static uint32_t lastChange = millis();
   bool colon = false;
@@ -220,7 +223,7 @@ bool UpdateDisplay(uint32_t elapsedMinutes, uint32_t totalMinutes, uint32_t now,
   if (active) {
     switch (mode) {
       case DisplayMode::TIME:
-        colon = DisplayTime();
+        colon = DisplayTime(dt);
         if (now - lastChange > 3 * 1000) {
           lastChange = now;
           mode = DisplayMode::ACTIVE;
@@ -239,7 +242,7 @@ bool UpdateDisplay(uint32_t elapsedMinutes, uint32_t totalMinutes, uint32_t now,
   } else {
     switch (mode) {
       case DisplayMode::TIME:
-        colon = DisplayTime();
+        colon = DisplayTime(dt);
         if (now - lastChange > 5 * 1000) {
           lastChange = now;
           mode = DisplayMode::TOTAL;
@@ -268,7 +271,7 @@ bool UpdateDisplay(uint32_t elapsedMinutes, uint32_t totalMinutes, uint32_t now,
 
 void ControlBrightness(uint8_t hour, bool active) {
   // Control display luminosity
-  if (hour > 22 || hour < 8) {
+  if (hour > 22 || hour < 7) {
     if (active) {
       // blink, blink, time to stop gaming!
       gDisplay.setBrightness(15);
@@ -294,34 +297,47 @@ void AnnounceOnce() {
   }
 }
 
-void AdjustClock(uint32_t refMillis, uint32_t refSeconds, float driftFactor) {
-  uint32_t millisOffset = millis() - refMillis;
-  // this will not work after 49 day without a time fix from the host ;-)
-  float secondsOffset = round(driftFactor * (float)(millisOffset) / 1000.0f);
-  uint32_t correctedEpoch = refSeconds + (uint32_t)(secondsOffset);
-  gRealTimeClock.setEpoch(correctedEpoch);
+void AdjustDrift(uint32_t previousSeconds, uint32_t rtcSeconds, uint32_t hostSeconds) {
+  static WeightedAverage<float, 5> deviations(0.0, 1.0);
+
+  float period = (float)(hostSeconds - previousSeconds);
+  float drift = (float)(rtcSeconds - previousSeconds) - period;
+  float deviation_ppm = drift / period * 1000000;  //  deviation in parts per million (μs)
+  Serial.print("DRIFT MEASURE: period=");
+  Serial.print(period, 1);
+  Serial.print("  drift=");
+  Serial.print(drift, 6);
+  Serial.print(" --> deviation=");
+  Serial.print(deviation_ppm);
+  if (period > 6.0 * 3600) {  // only use if at least for 6h offline
+    float updated_deviation = deviations.AddSample(deviation_ppm, period / 3600.0);
+    const float drift_unit = 4.34;  // use with offset mode PCF8523_TwoHours
+    int offset = round(updated_deviation / drift_unit);
+    // rtc.calibrate(PCF8523_TwoHours, offset);
+    Serial.print(" ==> UPDATE with new weighted average=");
+    Serial.print(updated_deviation);
+    Serial.print(" (offset=");
+    Serial.print(offset);
+    Serial.print(")");
+  }
+  Serial.println();
 }
 
-float ComputeDrift(uint32_t previousMillis,  uint32_t previousSeconds, uint32_t currentMillis,
-                   uint32_t rtcSeconds, uint32_t hostSeconds, float previousDriftFactor) {
-  static WeightedAverage<float, 5> driftFactors(kDefaultDriftFactor, 9.0 * 3.6);
-  const double elapsedMillis = (float)(currentMillis - previousMillis);
-  const double elapsedRtc = (float)(rtcSeconds - previousSeconds) / previousDriftFactor;
-  const double elapsedHost = (float)(hostSeconds - previousSeconds);
-  const double factor = 1000.0f * elapsedHost * elapsedHost / (elapsedMillis * elapsedRtc);
-  float updatedDriftFactor =
-      driftFactors.AddSample((float)(clamp((float)factor, 0.99f, 1.01f)), elapsedHost / 1000.0f);
-  Serial.print("DRIFT MEASURE: elapsedMillis=");
-  Serial.print(elapsedMillis);
-  Serial.print(", elapsedRtc=");
-  Serial.print(elapsedRtc);
-  Serial.print(", elapsedHost=");
-  Serial.println(elapsedHost);
-  Serial.print("previousFactor=");
-  Serial.print(previousDriftFactor, 6);
-  Serial.print(" --> correctionFactor=");
-  Serial.println(updatedDriftFactor, 6);
-  return updatedDriftFactor;
+void SecondsTick() { gNewSecond = true; }
+
+void PrintTime(const DateTime &now) {
+  Serial.print(now.year(), DEC);
+  Serial.print('/');
+  Serial.print(now.month(), DEC);
+  Serial.print('/');
+  Serial.print(now.day(), DEC);
+  Serial.print(" - ");
+  Serial.print(now.hour(), DEC);
+  Serial.print(':');
+  Serial.print(now.minute(), DEC);
+  Serial.print(':');
+  Serial.print(now.second(), DEC);
+  Serial.println();
 }
 
 void setup() {
@@ -337,9 +353,16 @@ void setup() {
   gFlashIndex = kAddrStart;
   gAccumulatedMinutes = MinutesOnFlash(gFlashIndex);
 
-  gRealTimeClock.begin();
-  gRealTimeClock.setDate(1, 9, 4);
-  gRealTimeClock.setTime(0, 0, 0);
+  if (!gRealTimeClock.begin()) {
+    Error(7);
+  }
+  if (gRealTimeClock.lostPower()) {
+    gRealTimeClock.adjust(kAbitraryStart);
+  }
+  gRealTimeClock.writeSqwPinMode(PCF8523_SquareWave1HZ);
+
+  pinMode(kSquareWavePin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(kSquareWavePin), SecondsTick, FALLING);
 
   delay(1000);
   Serial.begin(9600);
@@ -356,9 +379,7 @@ void setup() {
 void loop() {
   static uint32_t lastMinute(0);
   static uint32_t dailyMinutes(0);
-  static uint32_t lastTimeFromHostMillis(0);
   static uint32_t lastTimeFromHostSeconds(0);
-  static uint32_t lastCorrection(0);
   static uint32_t startActive(0);
   static uint32_t lastRead(0);
 
@@ -367,15 +388,21 @@ void loop() {
   static bool active(false);
   static bool connected(false);
   static bool dayRecorded(false);
-  static bool offlineDriftMeasured(true);  // at startup we cannot measure drift
-  static float offlineDriftFactor = kDefaultDriftFactor;
+  static bool offlineDriftMeasured(true);
+  static DateTime rtcDateTime(kAbitraryStart);
 
-  uint32_t now = millis();
+  if (gNewSecond) {
+    rtcDateTime = gRealTimeClock.now();
+    gNewSecond = false;
+    // PrintTime(rtcDateTime);
+  }
+  uint32_t nowMillis = millis();
+  uint32_t nowSeconds = rtcDateTime.secondstime();
 
   if (Serial) {
     if (Serial.available()) {
       uint8_t msg = Serial.read();
-      lastRead = now;
+      lastRead = nowMillis;
       connected = true;
       AnnounceOnce();
       if ((msg & kAppCommandMask) == kAppCommandMask) {
@@ -383,19 +410,15 @@ void loop() {
         uint8_t code = (msg >> 1) & 0x1F;
         if ((code > 24) & (code < 31)) {
           if (cachedHours < 24) {
-            uint32_t rtcSeconds = gRealTimeClock.getEpoch();
-            gRealTimeClock.setSeconds(0);
-            gRealTimeClock.setMinutes(10 * (code - 25) + 7);
-            gRealTimeClock.setHours(cachedHours);
-            uint32_t hostSeconds = gRealTimeClock.getEpoch();
-            if (!offlineDriftMeasured && lastTimeFromHostSeconds > 0) {
-              offlineDriftFactor =
-                  ComputeDrift(lastTimeFromHostMillis, lastTimeFromHostSeconds, now, rtcSeconds,
-                               hostSeconds, offlineDriftFactor);
+            const uint8_t minutes = 10 * (code - 25) + 7;
+            DateTime dt(rtcDateTime.year(), rtcDateTime.month(), rtcDateTime.day(), cachedHours,
+                        minutes, 0);
+            gRealTimeClock.adjust(dt);
+            if(!offlineDriftMeasured && lastTimeFromHostSeconds > 0) {
+              AdjustDrift(lastTimeFromHostSeconds, nowSeconds, dt.secondstime());
               offlineDriftMeasured = true;
             }
-            lastTimeFromHostSeconds = hostSeconds;
-            lastTimeFromHostMillis = now;
+            lastTimeFromHostSeconds = dt.secondstime();
           }  // command code = minutes
         } else if (code < 24) {
           // command code = hours
@@ -409,7 +432,7 @@ void loop() {
         appStatus = msg;
         if ((appStatus & kAppCounterMask) > 0) {
           if (!active) {
-            startActive = now;
+            startActive = nowSeconds;
             lastMinute = 0;
             active = true;
           }
@@ -421,14 +444,15 @@ void loop() {
   } else {
     connected = false;
   }
-  if (now - lastRead > 50 * 1000) {  // comms timeout
+  if (nowMillis - lastRead > 50 * 1000) {  // comms timeout
     active = false;
     connected = false;
-    lastCorrection = now;
+    offlineDriftMeasured = false;
+    cachedHours = 100;
   }
 
   // Mark new day to flash / reset daily counter
-  uint8_t rtcHours = gRealTimeClock.getHours();
+  uint8_t rtcHours = rtcDateTime.hour();
   if (rtcHours == 3) {
     if (!dayRecorded && lastTimeFromHostSeconds > 0) {
       const uint8_t newday = 0x00;
@@ -446,7 +470,7 @@ void loop() {
 
   // Check app status
   if (active) {
-    uint32_t numMinutes = (now - startActive) / kMinutePeriodMs;
+    uint32_t numMinutes = (nowSeconds - startActive) / kMinutePeriodSeconds;
     if (numMinutes > lastMinute) {
       uint32_t len = gFlash.writeBuffer(gFlashIndex, &appStatus, 1);
       gFlashIndex++;
@@ -458,20 +482,9 @@ void loop() {
       gAccumulatedMinutes++;
     }
   }
-  if (!connected) {
-    if (lastTimeFromHostSeconds > 0) {
-      // Only apply corrections if we were at least synched onece
-      offlineDriftMeasured = false;
-      cachedHours = 100;
-      if ((now - lastCorrection) > 3 * 60 * 1000) {
-        AdjustClock(lastTimeFromHostMillis, lastTimeFromHostSeconds, offlineDriftFactor);
-        lastCorrection = now;
-      }
-    }
-  }
 
-  bool colon = UpdateDisplay(dailyMinutes, gAccumulatedMinutes, now, active);
-  ControlDots(now, lastRead, connected, colon);
+  bool colon = UpdateDisplay(dailyMinutes, gAccumulatedMinutes, nowMillis, rtcDateTime, active);
+  ControlDots(nowMillis, lastRead, connected, colon);
   ControlBrightness(rtcHours, active);
 
   gDisplay.writeDisplay();
