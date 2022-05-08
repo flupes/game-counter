@@ -353,27 +353,29 @@ void setup() {
   gFlashIndex = kAddrStart;
   gAccumulatedMinutes = MinutesOnFlash(gFlashIndex);
 
-  if (!gRealTimeClock.begin()) {
-    Error(7);
-  }
-  if (gRealTimeClock.lostPower()) {
-    gRealTimeClock.adjust(kAbitraryStart);
-  }
-  gRealTimeClock.writeSqwPinMode(PCF8523_SquareWave1HZ);
-
-  pinMode(kSquareWavePin, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(kSquareWavePin), SecondsTick, FALLING);
-
-  delay(1000);
   Serial.begin(9600);
   delay(1000);
 
   gDisplay.print(gFlashIndex - kAddrStart);
   gDisplay.writeDisplay();
-  delay(3000);
+  delay(2000);
   gDisplay.print(gAccumulatedMinutes);
   gDisplay.writeDisplay();
-  delay(3000);
+  delay(2000);
+
+  Serial.println("Starting RTC");
+  if (!gRealTimeClock.begin()) {
+    Error(7);
+  }
+  if (!gRealTimeClock.initialized() || gRealTimeClock.lostPower()) {
+    Serial.println("RTC RESET!");
+    gRealTimeClock.adjust(kAbitraryStart);
+  }
+  gRealTimeClock.start();
+  gRealTimeClock.writeSqwPinMode(PCF8523_SquareWave1HZ);
+
+  pinMode(kSquareWavePin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(kSquareWavePin), SecondsTick, FALLING);
 }
 
 void loop() {
@@ -414,7 +416,7 @@ void loop() {
             DateTime dt(rtcDateTime.year(), rtcDateTime.month(), rtcDateTime.day(), cachedHours,
                         minutes, 0);
             gRealTimeClock.adjust(dt);
-            if(!offlineDriftMeasured && lastTimeFromHostSeconds > 0) {
+            if (!offlineDriftMeasured && lastTimeFromHostSeconds > 0) {
               AdjustDrift(lastTimeFromHostSeconds, nowSeconds, dt.secondstime());
               offlineDriftMeasured = true;
             }
