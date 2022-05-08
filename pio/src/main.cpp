@@ -433,10 +433,12 @@ void loop() {
         // received app status
         appStatus = msg;
         if ((appStatus & kAppCounterMask) > 0) {
-          if (!active) {
-            startActive = nowSeconds;
-            lastMinute = 0;
-            active = true;
+          if (lastTimeFromHostSeconds > 0) { // avoid staring counting without a host sync
+            if (!active) {
+              startActive = nowSeconds;
+              lastMinute = 0;
+              active = true;
+            }
           }
         } else {
           active = false;
